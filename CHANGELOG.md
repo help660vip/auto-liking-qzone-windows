@@ -1,0 +1,28 @@
+# Changelog
+
+本项目的版本变更记录遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构。
+
+## [2.0.0] - 2026-08-12
+
+### 新增
+
+- 新增命令行参数，可直接设置 QQ 号、轮询间隔、登录方式和单次运行模式。
+- 新增 `install.bat`、`start.bat` 和 `login.bat`，降低 Windows 首次使用门槛。
+- 新增配置解析、令牌计算和响应解析的单元测试。
+
+### 变更
+
+- QQ 号改为首次运行时输入或通过 `--qq` 传入，不再需要修改两个 Python 文件。
+- 使用 Selenium Manager 自动匹配 ChromeDriver，同时保留 `--driver` 手动指定能力。
+- 使用当前虚拟环境的 Python 启动登录脚本。
+- 默认轮询间隔调整为 30 秒，并为同一动态增加 5 分钟重试冷却。
+- 登录等待改为显式超时，网络请求增加连接/读取超时和仅 GET 的有限重试。
+- 点赞结果会解析服务端结果码，不再将所有 HTTP 200 响应视为成功。
+- 配置写入改为原子替换，避免登录中断留下损坏的 JSON 文件。
+
+### 安全
+
+- 新增 `.gitignore`，默认排除 Cookie 配置、日志、虚拟环境和浏览器驱动。
+- 日志只记录必要的状态信息，不输出 Cookie 或令牌内容。
+
+[2.0.0]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.0

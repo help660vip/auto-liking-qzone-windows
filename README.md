@@ -1,116 +1,132 @@
-# 🚀 QZone Auto Liker (QQ空间自动点赞机器人)
+# QZone Auto Liker
 
-一个基于 **Python** 的轻量级 QQ 空间自动点赞工具。
+一个在 Windows 上运行的 QQ 空间好友动态自动点赞脚本。浏览器只用于完成登录并获取 Cookie；登录后，程序通过 HTTP 请求轮询动态和提交点赞。
 
-采用 **Selenium** 处理复杂的模拟登录，配合 **Requests** 进行高效的后台轮询。既解决了登录验证难题，又保证了长期运行的低资源占用和高稳定性。
+当前版本为 `2.0.0`。这一版不再要求修改源码中的 QQ 号，并补上了请求超时、失败重试冷却、登录超时和点赞结果校验。
 
-## ✨ 核心特性
+> QQ 空间页面和接口并非公开 API，腾讯调整页面结构后脚本可能暂时失效。自动化操作也可能触发账号风控，请先阅读下方的使用边界。
 
-* ​⚡ 混合架构 ​：
-  * ​**登录端**​：使用 Selenium 模拟真机操作，获取高权重的 Cookie。
-  * ​**业务端**​：使用 Requests 纯协议轮询，内存占用极低，速度快。
-* ​🤖 全自动环境部署​：
-  * 脚本自动检测本地 Chrome 版本。
-  * 自动适配并从 Google 官方 API 下载对应的 `chromedriver`（支持配置代理下载）。
-* ​🔐 智能登录策略：
-  * ​**自动模式**​：自动定位并点击 QQ 头像（针对已登录客户端的 PC）。
-  * ​**手动模式**​：通过命令行参数切换至扫码/手动点击模式，应对复杂环境。
-* ​*🔄 Cookie 自动保活​：
-  * 主程序实时监控 Cookie 有效性。
-  * 一旦检测到失效（302 跳转），自动唤醒登录脚本刷新凭证，实现无人值守。
+## 功能
 
-## 环境依赖
+- 首次运行输入 QQ 号，后续从本地配置自动读取。
+- 支持浏览器已保存账号的自动点击，也支持手动扫码登录。
+- Selenium Manager 自动匹配 ChromeDriver；也可以使用本地驱动。
+- Cookie 失效后重新打开浏览器登录。
+- GET 请求使用有限重试；点赞 POST 不自动重放，避免重复操作。
+- 同一条动态默认 5 分钟内不重复尝试。
+- 支持只运行一轮，方便配合 Windows 任务计划程序。
 
-* ​**操作系统**​：Windows (已适配注册表读取)
-* ​**浏览器**​：Google Chrome
-* ​**Python 版本**​：Python 3.x
+## 运行条件
 
-### 安装 Python 库
+- Windows 10 或 Windows 11
+- Python 3.9 或更高版本
+- Google Chrome
 
-Bash
+## 快速开始
 
-```
-pip install requests selenium beautifulsoup4
+下载项目后，在项目目录依次运行：
+
+```bat
+install.bat
+start.bat --qq 123456789
 ```
 
-## 配置指南
+把 `123456789` 换成你的 QQ 号。首次运行会打开 Chrome：如果浏览器保存了账号，程序会尝试自动点击；否则直接在浏览器中扫码或手动登录。成功后凭据保存在本地 `config.json`，以后可以直接运行：
 
-在运行之前，请务必修改脚本顶部的配置区域。
-
-### 1. 基础配置
-
-打开 `ck.py` 和 `main.py`，找到以下变量并填入你的 QQ 号：
-
-Python
-
-```
-MY_QQ = '123456789'  # 修改为你的QQ号
+```bat
+start.bat
 ```
 
-### 2. 网络配置 (可选)
+`config.json` 包含账号 Cookie，已经被 `.gitignore` 排除。不要把它发给别人，也不要手动提交到 Git。
 
-如果你所在的网络环境无法直接访问 Google 下载 ChromeDriver，请在 ck.py 中配置代理。
+### 强制手动登录
 
-注意： 此代理仅用于下载驱动，点赞业务流量完全直连，不走代理。
+如果不希望程序自动点击已保存的账号：
 
-Python
-
-```
-# ck.py
-MANUAL_PROXY = "http://127.0.0.1:7890"  # 仅用于下载驱动
+```bat
+login.bat --qq 123456789
+start.bat
 ```
 
-## 运行说明
+也可以在启动主程序时使用：
 
-### 方式一：全自动运行 (推荐)
-
-直接运行主程序。它会自动检查配置、下载驱动，若 Cookie 缺失会自动调起浏览器进行登录。
-
-Bash
-
-```
-python main.py
+```bat
+start.bat --qq 123456789 --manual-login
 ```
 
-### 方式二：手动/独立登录
+### 不使用批处理文件
 
-如果你需要单独生成 Cookie，或自动登录失败，可以使用以下命令：
-
-1. 默认自动登录
-
-(等待 2 秒后自动点击头像)
-
-Bash
-
-```
-python ck.py
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py --qq 123456789
 ```
 
-2. 手动/扫码模式
+不需要激活虚拟环境，因此不会受到 PowerShell 执行策略影响。
 
-(启动浏览器后暂停，等待用户手动扫码或点击)
+## 常用参数
 
-Bash
+查看全部参数：
 
+```bat
+start.bat --help
 ```
-python ck.py hm
+
+常见用法：
+
+```bat
+:: 只检查一轮后退出
+start.bat --once
+
+:: 每 60 秒左右检查一次
+start.bat --interval 60 --jitter 10
+
+:: 手动指定 ChromeDriver
+.venv\Scripts\python.exe ck.py --driver C:\tools\chromedriver.exe --manual
+
+:: Chrome 通过本地代理访问网络
+.venv\Scripts\python.exe ck.py --proxy http://127.0.0.1:7890 --manual
 ```
+
+主要参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `--qq` | 本地配置 | 首次运行的 QQ 号 |
+| `--interval` | 30 秒 | 两轮检查之间的基础间隔 |
+| `--jitter` | 5 秒 | 每轮额外随机等待的上限 |
+| `--retry-delay` | 300 秒 | 同一动态再次尝试前的冷却时间 |
+| `--once` | 关闭 | 只检查一次，适合任务计划 |
+| `--manual-login` | 关闭 | 登录时不自动点击账号 |
+| `--no-log-file` | 关闭 | 只输出到终端，不写 `app.log` |
 
 ## 项目结构
 
-| **文件名**  | **说明**                                               | 
-| ------------------- | -------------------------------------------------------------- |
-| `main.py`     | ​**主核心**​。负责轮询动态、执行点赞、监控 Cookie 状态。  |
-| `ck.py`       | ​**登录器**​。负责环境检测、驱动下载、Selenium 模拟登录。 |
-| `config.json` | ​**凭证文件**​。自动生成，包含 Cookie、g\_tk 等关键参数。 |
-| `app.log`     | ​**运行日志**​。记录点赞详情和程序异常。                  |
+| 文件 | 作用 |
+| --- | --- |
+| `main.py` | 轮询动态、校验登录状态并提交点赞 |
+| `ck.py` | 打开 Chrome 完成登录并保存 Cookie |
+| `qzone_utils.py` | 配置校验、g_tk 计算和响应解析 |
+| `tests/` | 不依赖网络的单元测试 |
+| `install.bat` | 创建虚拟环境并安装依赖 |
+| `start.bat` | 使用项目虚拟环境启动主程序 |
+| `login.bat` | 使用手动模式刷新登录状态 |
+| `config.json` | 本地登录凭据，运行后生成且不会提交 |
+| `app.log` | 运行日志，不会提交 |
 
-## 免责声明
+## 测试
 
-* 本项目仅供 Python 爬虫技术交流与学习使用。
-* ​**严禁用于商业用途或恶意骚扰**​。
-* 使用脚本操作账号存在一定风险（如账号风控、限制登录等），请使用者自行评估并承担后果。
+```bat
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
----
+测试不访问 QQ 空间，也不需要真实 Cookie。
 
-**Enjoy Coding!** ⭐ 如果觉得好用，欢迎点个 Star。
+## 使用边界
+
+- 仅用于学习、个人测试和维护自己的账号。
+- 不要提高请求频率、批量控制账号或用于骚扰他人。
+- Cookie 等同于登录凭据；一旦泄露，请立即在 QQ 安全中心退出相关登录。
+- 使用者需要自行遵守腾讯的服务条款并承担账号限制等风险。
+
+版本变化见 [CHANGELOG.md](CHANGELOG.md)。遇到问题时，请附上 Python 版本、Chrome 版本和去除敏感信息后的日志。

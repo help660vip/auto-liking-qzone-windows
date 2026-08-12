@@ -1,236 +1,209 @@
 # -*- coding: utf-8 -*-
-# ck.py
-import os
+"""Open Chrome, complete QZone login, and save the resulting credentials."""
+
+from __future__ import annotations
+
+import argparse
 import sys
-import json
-import time
-import zipfile
-import requests
-import shutil
+from pathlib import Path
+from typing import Optional
+
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By  # 【新增】用于定位元素
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
-# Windows 注册表访问
-if sys.platform == "win32":
-    import winreg
+from qzone_utils import (
+    ConfigError,
+    Credentials,
+    calculate_g_tk,
+    cookie_value,
+    read_qq_hint,
+    save_credentials,
+    validate_qq,
+)
 
-# ================= 配置区域 =================
-MY_QQ = '10086' 
-CONFIG_FILE = "config.json"
-DRIVER_NAME = "chromedriver.exe"
 
-# Google 官方 API
-GOOGLE_API_URL = "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json"
+PROJECT_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG_FILE = PROJECT_DIR / "config.json"
+DEFAULT_DRIVER = PROJECT_DIR / "chromedriver.exe"
 
-# 【重要】手动代理配置
-MANUAL_PROXY = None 
-# ===========================================
 
-def get_proxies():
-    """构造代理字典"""
-    if MANUAL_PROXY:
-        print(f"[CK] 使用手动代理: {MANUAL_PROXY}")
-        return {
-            "http": MANUAL_PROXY,
-            "https": MANUAL_PROXY
-        }
-    return None
+def resolve_qq(cli_value: Optional[str], config_path: Path) -> str:
+    if cli_value:
+        return validate_qq(cli_value)
+    saved_qq = read_qq_hint(config_path)
+    if saved_qq:
+        return saved_qq
+    if sys.stdin.isatty():
+        return validate_qq(input("请输入要登录的 QQ 号: "))
+    raise ConfigError("首次运行需要通过 --qq 指定 QQ 号")
 
-def get_chrome_version():
-    """从注册表获取 Windows Chrome 版本"""
+
+def create_driver(driver_path: Optional[Path], proxy: Optional[str]):
+    options = Options()
+    options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    if proxy:
+        options.add_argument(f"--proxy-server={proxy}")
+
+    selected_driver = driver_path
+    if selected_driver is None and DEFAULT_DRIVER.exists():
+        selected_driver = DEFAULT_DRIVER
+    if selected_driver is not None:
+        selected_driver = selected_driver.expanduser().resolve()
+        if not selected_driver.is_file():
+            raise ConfigError(f"ChromeDriver 不存在: {selected_driver}")
+        return webdriver.Chrome(
+            service=Service(executable_path=str(selected_driver)), options=options
+        )
+
+    print("[登录] 未指定 ChromeDriver，将由 Selenium Manager 自动匹配")
+    return webdriver.Chrome(options=options)
+
+
+def try_automatic_login(driver, qq: str) -> None:
+    print("[登录] 尝试点击浏览器中已保存的 QQ 账号")
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon")
-        version, _ = winreg.QueryValueEx(key, "version")
-        return version
-    except:
+        WebDriverWait(driver, 15).until(
+            EC.frame_to_be_available_and_switch_to_it((By.ID, "login_frame"))
+        )
         try:
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
-            path, _ = winreg.QueryValueEx(key, "")
-            return None
-        except:
-            return None
-
-def download_driver():
-    """下载驱动 (支持手动代理)"""
-    if os.path.exists(DRIVER_NAME):
-        return True
-        
-    print("[CK] 正在检测本地 Chrome 版本...")
-    ver = get_chrome_version()
-    if not ver:
-        print("[CK] 无法获取 Chrome 版本，请手动下载。")
-        return False
-        
-    print(f"[CK] 本地 Chrome 版本: {ver}")
-    major_ver = ver.split('.')[0]
-    
-    print(f"[CK] 正在连接 Google API 获取驱动...")
-    
-    proxies = get_proxies()
-    
-    try:
-        res = requests.get(GOOGLE_API_URL, proxies=proxies, timeout=15)
-        if res.status_code != 200:
-            print(f"[CK] API 请求失败: {res.status_code}")
-            return False
-            
-        data = res.json()
-        milestones = data.get("milestones", {})
-        
-        if major_ver not in milestones:
-            print(f"[CK] 未找到 {major_ver} 版本的精确匹配，尝试获取最新版兼容...")
-            all_keys = sorted([int(k) for k in milestones.keys()])
-            major_ver = str(all_keys[-1])
-            print(f"[CK] 目标版本调整为: {major_ver}")
-            
-        driver_info = milestones[major_ver]["downloads"]["chromedriver"]
-        
-        download_url = ""
-        for item in driver_info:
-            if item["platform"] == "win64":
-                download_url = item["url"]
-                break
-        
-        if not download_url:
-            print("[CK] 未找到 win64 驱动链接。")
-            return False
-            
-        print(f"[CK] 下载链接: {download_url}")
-        
-        r = requests.get(download_url, proxies=proxies, stream=True, timeout=60)
-        zip_name = "driver.zip"
-        with open(zip_name, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=1024):
-                if chunk: f.write(chunk)
-                
-        print("[CK] 解压中...")
-        with zipfile.ZipFile(zip_name, 'r') as z:
-            exe_path = next((n for n in z.namelist() if "chromedriver.exe" in n), None)
-            if not exe_path:
-                print("[CK] 压缩包异常。")
-                return False
-            
-            with z.open(exe_path) as source, open(DRIVER_NAME, "wb") as target:
-                shutil.copyfileobj(source, target)
-        
-        os.remove(zip_name)
-        print(f"[CK] 驱动安装完成: {DRIVER_NAME}")
-        return True
-
-    except Exception as e:
-        print(f"[CK] 下载失败: {e}")
-        print("[提示] 如果是连接错误，请在 ck.py 顶部填入 MANUAL_PROXY 代理地址")
-        return False
-
-def get_cookie(is_manual_mode=False):
-    if not download_driver():
-        sys.exit(1)
-        
-    print("[CK] 启动浏览器...")
-    chrome_options = Options()
-    chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
-    
-    service = Service(executable_path=DRIVER_NAME)
-    
-    try:
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        
-        login_url = "https://qzone.qq.com/"
-        print(f"[CK] 打开登录页: {login_url}")
-        driver.get(login_url)
-        
-        # =================【修改开始】交互逻辑 =================
-        if is_manual_mode:
-            print(">>> [模式] 检测到 'hm' 参数，请手动扫码或点击登录 <<<")
-        else:
-            print(">>> [模式] 自动登录 (2秒后尝试点击头像) <<<")
-            time.sleep(2) # 等待页面加载
-            
-            try:
-                # QQ登录框在 iframe 里，必须先切进去
-                driver.switch_to.frame("login_frame")
-                
-                # 尝试定位头像按钮
-                # ID 通常为 img_out_QQ号，如果找不到就找列表里的第一个
-                try:
-                    # 精确查找
-                    avatar_btn = driver.find_element(By.ID, f"img_out_{MY_QQ}")
-                    print(f"[CK] 找到账号 {MY_QQ}，正在点击...")
-                    avatar_btn.click()
-                except:
-                    # 模糊查找（列表第一个）
-                    print("[CK] 未找到精确账号，尝试点击列表第一个...")
-                    driver.find_element(By.CSS_SELECTOR, "#qlogin_list a").click()
-                
-                # 切回主文档，以免影响后续 URL 检测
-                driver.switch_to.default_content()
-                
-            except Exception as e:
-                print(f"[CK] 自动点击失败: {e}")
-                print("[CK] 可能原因：浏览器未登录过QQ、界面改版或加载过慢。")
-                print(">>> 请手动完成登录 <<<")
-                # 切回主文档防止卡死
-                driver.switch_to.default_content()
-        # =================【修改结束】=========================
-        
-        # 循环等待登录
-        while True:
-            try:
-                # 检测 URL 变化
-                if "user.qzone.qq.com" in driver.current_url and "passport" not in driver.current_url:
-                    print("[CK] 登录成功！")
-                    break
-            except: pass
-            time.sleep(1)
-            
-        target_url = f"https://user.qzone.qq.com/{MY_QQ}/infocenter?via=toolbar"
-        print(f"[CK] 跳转至: {target_url}")
-        driver.get(target_url)
-        
-        print("[CK] 等待 5 秒确保页面加载完整...")
-        time.sleep(5)
-        
-        print("[CK] 提取数据...")
-        cookies = driver.get_cookies()
-        ua = driver.execute_script("return navigator.userAgent;")
-        
-        cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-        
-        p_skey = next((c['value'] for c in cookies if c['name'] == 'p_skey'), "")
-        h = 5381
-        if p_skey:
-            for c in p_skey:
-                h += (h << 5) + ord(c)
-            g_tk = h & 2147483647
-        else:
-            g_tk = ""
-
-        data = {
-            "qq": MY_QQ,
-            "cookie_str": cookie_str,
-            "user_agent": ua,
-            "g_tk": g_tk,
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-            
-        print(f"[CK] 配置保存成功。")
-        
-    except Exception as e:
-        print(f"[CK] 运行时错误: {e}")
+            avatar = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.ID, f"img_out_{qq}"))
+            )
+        except TimeoutException:
+            avatar = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "#qlogin_list a"))
+            )
+        avatar.click()
+    except (TimeoutException, WebDriverException) as exc:
+        print(f"[登录] 自动点击未完成: {exc}")
+        print("[登录] 请在浏览器中手动完成登录")
     finally:
-        if 'driver' in locals():
+        try:
+            driver.switch_to.default_content()
+        except WebDriverException:
+            pass
+
+
+def is_logged_in(driver) -> bool:
+    current_url = driver.current_url.lower()
+    return "user.qzone.qq.com" in current_url and "passport" not in current_url
+
+
+def acquire_credentials(
+    qq: str,
+    config_path: Path,
+    manual: bool,
+    driver_path: Optional[Path],
+    proxy: Optional[str],
+    login_timeout: float,
+) -> bool:
+    driver = None
+    try:
+        print("[登录] 正在启动 Chrome")
+        driver = create_driver(driver_path, proxy)
+        driver.get("https://qzone.qq.com/")
+
+        if manual:
+            print("[登录] 请扫码或点击账号登录")
+        else:
+            try_automatic_login(driver, qq)
+
+        print(f"[登录] 等待登录完成，最多 {int(login_timeout)} 秒")
+        WebDriverWait(driver, login_timeout, poll_frequency=1).until(is_logged_in)
+
+        target_url = f"https://user.qzone.qq.com/{qq}/infocenter?via=toolbar"
+        driver.get(target_url)
+        WebDriverWait(driver, 30).until(
+            lambda browser: browser.execute_script("return document.readyState")
+            == "complete"
+        )
+
+        cookies = driver.get_cookies()
+        cookie_str = "; ".join(
+            f"{item['name']}={item['value']}" for item in cookies
+        )
+        user_agent = driver.execute_script("return navigator.userAgent;")
+        skey = cookie_value(cookie_str, "p_skey") or cookie_value(cookie_str, "skey")
+        if not skey:
+            raise ConfigError("登录 Cookie 中没有 p_skey/skey，请重新登录后再试")
+
+        credentials = Credentials(
+            qq=qq,
+            cookie_str=cookie_str,
+            user_agent=user_agent,
+            g_tk=calculate_g_tk(skey),
+        )
+        save_credentials(config_path, credentials)
+        print(f"[登录] 登录配置已保存到 {config_path}")
+        return True
+    except TimeoutException:
+        print("[登录] 等待登录超时，未写入配置")
+        return False
+    except (ConfigError, OSError, WebDriverException) as exc:
+        print(f"[登录] 失败: {exc}")
+        if isinstance(exc, WebDriverException) and driver_path is None:
+            print("[提示] 可手动下载匹配的 chromedriver.exe 并用 --driver 指定路径")
+        return False
+    finally:
+        if driver is not None:
             driver.quit()
 
-if __name__ == "__main__":
-    # 检测命令行参数
-    is_hm = False
-    if len(sys.argv) > 1 and sys.argv[1] == 'hm':
-        is_hm = True
-        
 
-    get_cookie(is_manual_mode=is_hm)
+def positive_number(value: str) -> float:
+    number = float(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("必须大于 0")
+    return number
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="获取并保存 QQ 空间登录配置")
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=("hm",),
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--qq", help="要登录的 QQ 号")
+    parser.add_argument(
+        "--config", type=Path, default=DEFAULT_CONFIG_FILE, help="配置保存路径"
+    )
+    parser.add_argument("--manual", action="store_true", help="不自动点击账号，等待手动登录")
+    parser.add_argument("--driver", type=Path, help="本地 chromedriver.exe 路径")
+    parser.add_argument("--proxy", help="Chrome 使用的代理，例如 http://127.0.0.1:7890")
+    parser.add_argument(
+        "--login-timeout",
+        type=positive_number,
+        default=180.0,
+        help="等待登录的秒数（默认: 180）",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    config_path = args.config.expanduser().resolve()
+    try:
+        qq = resolve_qq(args.qq, config_path)
+    except ConfigError as exc:
+        print(f"[登录] {exc}")
+        return 2
+
+    success = acquire_credentials(
+        qq=qq,
+        config_path=config_path,
+        manual=args.manual or args.mode == "hm",
+        driver_path=args.driver,
+        proxy=args.proxy,
+        login_timeout=args.login_timeout,
+    )
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
