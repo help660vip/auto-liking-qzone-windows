@@ -115,25 +115,19 @@ def create_driver(driver_path):
     options = Options()
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
 
-    selected = driver_path
-    if selected is None and DEFAULT_DRIVER.exists():
+    if driver_path is None:
         selected = DEFAULT_DRIVER
-    if selected is not None:
-        selected = selected.expanduser().resolve()
+        if not selected.exists():
+            print("[登录] 未找到 ChromeDriver，准备自动下载")
+            selected = download_driver()
+    else:
+        selected = driver_path.expanduser().resolve()
         if not selected.is_file():
             raise ValueError(f"找不到 ChromeDriver: {selected}")
-        return webdriver.Chrome(
-            service=Service(executable_path=str(selected)), options=options
-        )
 
-    try:
-        return webdriver.Chrome(options=options)
-    except WebDriverException:
-        print("[登录] Selenium Manager 无法获取驱动，改用官方下载")
-        selected = download_driver()
-        return webdriver.Chrome(
-            service=Service(executable_path=str(selected)), options=options
-        )
+    return webdriver.Chrome(
+        service=Service(executable_path=str(selected)), options=options
+    )
 
 
 def click_saved_account(driver, qq):

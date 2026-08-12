@@ -2,6 +2,12 @@
 
 本项目的版本变更记录遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构。
 
+## [2.0.3] - 2026-08-12
+
+### 修复
+
+- 缺少本地驱动时直接下载，不再先等待 Selenium Manager 超时。
+
 ## [2.0.2] - 2026-08-12
 
 ### 修复
@@ -44,3 +50,4 @@
 [2.0.0]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.0
 [2.0.1]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.1
 [2.0.2]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.2
+[2.0.3]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.3
