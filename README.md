@@ -2,7 +2,7 @@
 
 一个在 Windows 上运行的 QQ 空间好友动态自动点赞脚本。
 
-程序使用 Selenium 打开 Chrome 完成登录并保存 Cookie，随后使用 Requests 读取好友动态和提交点赞。登录信息只保存在本地 `config.json`。
+程序使用 Selenium 打开 Chrome 完成登录、加载动态和点赞，Requests 只用于检查登录状态。登录信息保存在本地 `config.json`。
 
 ## 功能
 

@@ -111,9 +111,12 @@ def download_driver():
     return DEFAULT_DRIVER
 
 
-def create_driver(driver_path):
+def create_driver(driver_path, headless=False):
     options = Options()
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    if headless:
+        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1400,1000")
 
     if driver_path is None:
         selected = DEFAULT_DRIVER

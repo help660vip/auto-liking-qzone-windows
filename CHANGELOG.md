@@ -2,6 +2,13 @@
 
 本项目的版本变更记录遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构。
 
+## [2.0.4] - 2026-08-12
+
+### 修复
+
+- 改为读取浏览器渲染后的好友动态并调用页面点赞按钮。
+- 删除已失效的静态 HTML 解析和内部接口参数处理。
+
 ## [2.0.3] - 2026-08-12
 
 ### 修复
@@ -51,3 +58,4 @@
 [2.0.1]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.1
 [2.0.2]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.2
 [2.0.3]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.3
+[2.0.4]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.4

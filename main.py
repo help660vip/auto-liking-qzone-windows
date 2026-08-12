@@ -4,24 +4,26 @@
 import argparse
 import json
 import logging
-import random
-import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import requests
-from bs4 import BeautifulSoup
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+
+from ck import create_driver
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = BASE_DIR / "config.json"
 LOGIN_SCRIPT = BASE_DIR / "ck.py"
-LIKE_URL = (
-    "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/"
-    "cgi-bin/likes/internal_dolike_app"
-)
 REQUEST_TIMEOUT = 15
 
 logging.basicConfig(
@@ -80,10 +82,10 @@ def request_headers(config):
     }
 
 
-def cookie_is_valid(session, qq, config):
+def cookie_is_valid(qq, config):
     url = f"https://user.qzone.qq.com/{qq}/infocenter"
     try:
-        response = session.get(
+        response = requests.get(
             url,
             headers=request_headers(config),
             allow_redirects=False,
@@ -109,10 +111,10 @@ def open_login(qq, config_path, manual):
     return subprocess.run(command, check=False).returncode == 0
 
 
-def ensure_login(session, qq, config_path, manual):
+def ensure_login(qq, config_path, manual):
     try:
         config = load_config(config_path)
-        if config["qq"] == qq and cookie_is_valid(session, qq, config):
+        if config["qq"] == qq and cookie_is_valid(qq, config):
             return config
     except ValueError:
         pass
@@ -123,83 +125,76 @@ def ensure_login(session, qq, config_path, manual):
     return load_config(config_path)
 
 
-def like_post(session, qq, config, button):
-    fields = {
-        name: button.get(f"data-{name}")
-        for name in ("unikey", "curkey", "appid", "typeid", "abstime")
-    }
-    if not all(fields.values()):
-        return False
+def start_browser(config):
+    driver = create_driver(None, headless=True)
+    driver.set_page_load_timeout(30)
+    driver.get("https://qzone.qq.com/")
+    for part in config["cookie_str"].split(";"):
+        name, separator, value = part.strip().partition("=")
+        if not separator:
+            continue
+        try:
+            driver.add_cookie({"name": name, "value": value, "domain": ".qq.com"})
+        except WebDriverException:
+            pass
+    return driver
 
-    feed_url = f"https://user.qzone.qq.com/{qq}/infocenter?via=toolbar"
-    headers = {
-        **request_headers(config),
-        "Referer": feed_url,
-        "Origin": "https://user.qzone.qq.com",
-    }
-    data = {
-        "qzreferrer": feed_url,
-        "opuin": qq,
-        **fields,
-        "from": "1",
-        "fid": fields["unikey"].rsplit("/", 1)[-1],
-        "active": "0",
-        "fupdate": "1",
-        "g_tk": str(config["g_tk"]),
-    }
 
+def get_nickname(button):
     try:
-        response = session.post(
-            LIKE_URL,
-            params={"g_tk": config["g_tk"]},
-            data=data,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
+        item = button.find_element(
+            By.XPATH, "./ancestor::li[contains(@class, 'f-single')][1]"
         )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.warning("点赞请求失败: %s", exc)
-        return False
-
-    match = re.search(r'"?code"?\s*:\s*(-?\d+)', response.text)
-    return bool(match and match.group(1) == "0")
+        return item.find_element(By.CSS_SELECTOR, "a.nickname").text.strip() or "未知用户"
+    except WebDriverException:
+        return "未知用户"
 
 
-def check_feed(session, qq, config, attempted):
+def button_is_liked(button):
+    try:
+        return "item-on" in (button.get_attribute("class") or "").split()
+    except StaleElementReferenceException:
+        return True
+
+
+def check_feed(driver, qq, attempted):
     url = f"https://user.qzone.qq.com/{qq}/infocenter?via=toolbar"
-    response = session.get(
-        url,
-        headers=request_headers(config),
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    if "login" in response.url.lower() or "ptlogin" in response.url.lower():
+    logger.info("正在加载好友动态")
+    driver.get(url)
+    if "login" in driver.current_url.lower() or "ptlogin" in driver.current_url.lower():
         raise LoginRequired("登录状态已失效")
 
-    items = BeautifulSoup(response.content, "html.parser").find_all(
-        "li", class_="f-single"
-    )
-    success_count = 0
-    for item in items:
-        button = item.find("a", class_="qz_like_btn_v3")
-        if not button or "item-on" in button.get("class", []):
-            continue
+    try:
+        WebDriverWait(driver, 15).until(
+            lambda browser: browser.find_elements(By.CSS_SELECTOR, "li.f-single")
+        )
+    except TimeoutException:
+        pass
 
-        key = button.get("data-unikey")
-        if not key or key in attempted:
-            continue
-        attempted.add(key)
+    items = driver.find_elements(By.CSS_SELECTOR, "li.f-single")
+    liked_count = 0
+    while True:
+        target = None
+        for button in driver.find_elements(By.CSS_SELECTOR, "a.qz_like_btn_v3"):
+            key = button.get_attribute("data-unikey")
+            if key and key not in attempted and not button_is_liked(button):
+                target = button
+                attempted.add(key)
+                break
+        if target is None:
+            break
 
-        nickname = item.find("a", class_="nickname")
-        nickname = nickname.get_text(strip=True) if nickname else "未知用户"
-        if like_post(session, qq, config, button):
-            success_count += 1
+        nickname = get_nickname(target)
+        try:
+            driver.execute_script("arguments[0].click()", target)
+            WebDriverWait(driver, 5).until(lambda _browser: button_is_liked(target))
+            liked_count += 1
             logger.info("点赞成功: %s", nickname)
-        else:
+        except (TimeoutException, WebDriverException):
             logger.warning("点赞失败: %s", nickname)
-        time.sleep(random.uniform(1, 2))
+        time.sleep(1)
 
-    return len(items), success_count
+    return len(items), liked_count
 
 
 def interval_value(value):
@@ -226,34 +221,39 @@ def parse_args():
 def main():
     args = parse_args()
     config_path = args.config.resolve()
+    driver = None
     try:
         qq = resolve_qq(args.qq, config_path)
-    except ValueError as exc:
-        logger.error("%s", exc)
-        return 2
+        config = ensure_login(qq, config_path, args.manual_login)
+        driver = start_browser(config)
+        attempted = set()
 
-    session = requests.Session()
-    attempted = set()
-    try:
-        config = ensure_login(session, qq, config_path, args.manual_login)
         while True:
             try:
-                total, liked = check_feed(session, qq, config, attempted)
+                total, liked = check_feed(driver, qq, attempted)
                 logger.info("本轮检查 %s 条动态，点赞 %s 条", total, liked)
             except LoginRequired:
-                config = ensure_login(session, qq, config_path, args.manual_login)
+                driver.quit()
+                driver = None
+                if not open_login(qq, config_path, args.manual_login):
+                    raise LoginRequired("重新登录没有完成")
+                config = load_config(config_path)
+                driver = start_browser(config)
                 continue
-            except requests.RequestException as exc:
-                logger.warning("读取动态失败: %s", exc)
+            except WebDriverException as exc:
+                logger.warning("浏览器操作失败: %s", exc)
 
             if args.once:
                 break
             time.sleep(args.interval)
-    except (LoginRequired, ValueError, OSError) as exc:
+    except (LoginRequired, ValueError, OSError, WebDriverException) as exc:
         logger.error("%s", exc)
         return 1
     except KeyboardInterrupt:
         logger.info("程序已停止")
+    finally:
+        if driver is not None:
+            driver.quit()
     return 0
 
 
