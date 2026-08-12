@@ -2,6 +2,13 @@
 
 本项目的版本变更记录遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构。
 
+## [2.0.2] - 2026-08-12
+
+### 修复
+
+- Selenium Manager 无法获取驱动时，自动下载与本机 Chrome 主版本匹配的 ChromeDriver。
+- 从 Windows 默认安装目录读取 Chrome 版本。
+
 ## [2.0.1] - 2026-08-12
 
 ### 变更
@@ -36,3 +43,4 @@
 
 [2.0.0]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.0
 [2.0.1]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.1
+[2.0.2]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.2

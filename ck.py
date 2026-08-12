@@ -2,11 +2,15 @@
 """通过 Chrome 登录 QQ 空间并保存 Cookie。"""
 
 import argparse
+import io
 import json
+import os
 import sys
 import time
+import zipfile
 from pathlib import Path
 
+import requests
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
@@ -17,6 +21,10 @@ from selenium.webdriver.common.by import By
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = BASE_DIR / "config.json"
 DEFAULT_DRIVER = BASE_DIR / "chromedriver.exe"
+DRIVER_API = (
+    "https://googlechromelabs.github.io/chrome-for-testing/"
+    "latest-versions-per-milestone-with-downloads.json"
+)
 
 
 def validate_qq(value):
@@ -45,6 +53,64 @@ def calculate_g_tk(skey):
     return value & 0x7FFFFFFF
 
 
+def get_chrome_version():
+    versions = []
+    for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(variable)
+        if not base:
+            continue
+        for child in (Path(base) / "Google/Chrome/Application").glob("*"):
+            parts = child.name.split(".")
+            if (
+                child.is_dir()
+                and len(parts) == 4
+                and all(part.isdigit() for part in parts)
+            ):
+                versions.append(child.name)
+    if versions:
+        return max(versions, key=lambda value: tuple(map(int, value.split("."))))
+    return None
+
+
+def download_driver():
+    version = get_chrome_version()
+    if not version:
+        raise ValueError("无法读取 Chrome 版本，请使用 --driver 指定 ChromeDriver")
+
+    milestone = version.split(".")[0]
+    print(f"[登录] 本机 Chrome 版本: {version}")
+    print("[登录] 正在下载匹配的 ChromeDriver")
+    try:
+        response = requests.get(DRIVER_API, timeout=20)
+        response.raise_for_status()
+        downloads = response.json()["milestones"][milestone]["downloads"][
+            "chromedriver"
+        ]
+        architecture = os.environ.get("PROCESSOR_ARCHITECTURE", "")
+        target_platform = "win64" if architecture.endswith("64") else "win32"
+        download_url = next(
+            item["url"] for item in downloads if item["platform"] == target_platform
+        )
+
+        download = requests.get(download_url, timeout=60)
+        download.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+            member = next(
+                name
+                for name in archive.namelist()
+                if name.endswith("/chromedriver.exe")
+            )
+            temporary_driver = DEFAULT_DRIVER.with_suffix(".tmp")
+            temporary_driver.write_bytes(archive.read(member))
+            temporary_driver.replace(DEFAULT_DRIVER)
+    except (requests.RequestException, KeyError, StopIteration, ValueError, zipfile.BadZipFile) as exc:
+        DEFAULT_DRIVER.with_suffix(".tmp").unlink(missing_ok=True)
+        raise ValueError(f"ChromeDriver 下载失败: {exc}") from exc
+
+    print(f"[登录] ChromeDriver 已保存到 {DEFAULT_DRIVER}")
+    return DEFAULT_DRIVER
+
+
 def create_driver(driver_path):
     options = Options()
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
@@ -59,7 +125,15 @@ def create_driver(driver_path):
         return webdriver.Chrome(
             service=Service(executable_path=str(selected)), options=options
         )
-    return webdriver.Chrome(options=options)
+
+    try:
+        return webdriver.Chrome(options=options)
+    except WebDriverException:
+        print("[登录] Selenium Manager 无法获取驱动，改用官方下载")
+        selected = download_driver()
+        return webdriver.Chrome(
+            service=Service(executable_path=str(selected)), options=options
+        )
 
 
 def click_saved_account(driver, qq):

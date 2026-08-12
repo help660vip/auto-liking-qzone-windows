@@ -2,6 +2,7 @@ config.json
 config.json.tmp
 app.log*
 chromedriver.exe
+chromedriver.tmp
 
 __pycache__/
 *.py[cod]

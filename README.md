@@ -10,7 +10,7 @@
 - 支持浏览器已保存账号和手动扫码登录
 - Cookie 失效时重新打开浏览器登录
 - 支持指定轮询间隔或只检查一次
-- 自动使用 Selenium Manager 匹配 ChromeDriver，也可以指定本地驱动
+- 自动匹配 ChromeDriver，也可以指定本地驱动
 
 ## 环境要求
 
@@ -58,6 +58,8 @@ python main.py --once
 # 使用本地 ChromeDriver
 python ck.py --driver C:\tools\chromedriver.exe --manual
 ```
+
+如果自动下载失败，可以从 ChromeDriver 官方页面下载与本机 Chrome 主版本一致的驱动，再通过 `--driver` 指定路径。
 
 查看完整参数：
 
