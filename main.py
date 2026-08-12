@@ -1,439 +1,260 @@
 # -*- coding: utf-8 -*-
-"""Poll QZone feeds and like posts that have not been liked yet."""
-
-from __future__ import annotations
+"""QQ 空间好友动态自动点赞。"""
 
 import argparse
+import json
 import logging
 import random
+import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-from qzone_utils import (
-    VERSION,
-    ConfigError,
-    Credentials,
-    extract_callback_code,
-    load_credentials,
-    read_qq_hint,
-    validate_qq,
+
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG = BASE_DIR / "config.json"
+LOGIN_SCRIPT = BASE_DIR / "ck.py"
+LIKE_URL = (
+    "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/"
+    "cgi-bin/likes/internal_dolike_app"
 )
+REQUEST_TIMEOUT = 15
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(BASE_DIR / "app.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG_FILE = PROJECT_DIR / "config.json"
-DEFAULT_LOG_FILE = PROJECT_DIR / "app.log"
-CK_SCRIPT = PROJECT_DIR / "ck.py"
-REQUEST_TIMEOUT = (5, 20)
-
-LOGGER = logging.getLogger("qzone-auto-liker")
+class LoginRequired(Exception):
+    pass
 
 
-class AuthenticationExpired(RuntimeError):
-    """Raised when QZone redirects a request to its login page."""
+def validate_qq(value):
+    qq = str(value or "").strip()
+    if not qq.isdigit() or not 5 <= len(qq) <= 12 or qq.startswith("0"):
+        raise ValueError("QQ 号格式不正确")
+    return qq
 
 
-@dataclass(frozen=True)
-class LikeTarget:
-    unikey: str
-    curkey: str
-    appid: str
-    typeid: str
-    abstime: str
-    nickname: str
+def load_config(path):
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            config = json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"无法读取配置: {exc}") from exc
+
+    required = ("qq", "cookie_str", "user_agent", "g_tk")
+    if not isinstance(config, dict) or any(
+        config.get(key) in (None, "") for key in required
+    ):
+        raise ValueError("配置内容不完整")
+    config["qq"] = validate_qq(config["qq"])
+    return config
 
 
-def build_session() -> requests.Session:
-    session = requests.Session()
-    retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        backoff_factor=0.5,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET"}),
-        respect_retry_after_header=True,
-    )
-    session.mount("https://", HTTPAdapter(max_retries=retry))
-    return session
+def resolve_qq(value, config_path):
+    if value:
+        return validate_qq(value)
+    try:
+        return load_config(config_path)["qq"]
+    except ValueError:
+        if sys.stdin.isatty():
+            return validate_qq(input("请输入 QQ 号: "))
+        raise ValueError("首次运行请使用 --qq 指定 QQ 号")
 
 
-def configure_logging(log_file: Optional[Path], verbose: bool) -> None:
-    handlers = [logging.StreamHandler()]
-    if log_file is not None:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=handlers,
-        force=True,
-    )
+def request_headers(config):
+    return {
+        "User-Agent": config["user_agent"],
+        "Cookie": config["cookie_str"],
+    }
 
 
-def positive_number(value: str) -> float:
-    number = float(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError("必须大于 0")
-    return number
-
-
-def non_negative_number(value: str) -> float:
-    number = float(value)
-    if number < 0:
-        raise argparse.ArgumentTypeError("不能小于 0")
-    return number
-
-
-def resolve_qq(cli_value: Optional[str], config_path: Path) -> str:
-    if cli_value:
-        return validate_qq(cli_value)
-    saved_qq = read_qq_hint(config_path)
-    if saved_qq:
-        return saved_qq
-    if sys.stdin.isatty():
-        return validate_qq(input("请输入要登录的 QQ 号: "))
-    raise ConfigError("首次运行需要通过 --qq 指定 QQ 号")
-
-
-class QZoneAutoLiker:
-    def __init__(
-        self,
-        qq: str,
-        config_path: Path,
-        manual_login: bool,
-        retry_delay: float,
-    ) -> None:
-        self.qq = qq
-        self.config_path = config_path
-        self.manual_login = manual_login
-        self.retry_delay = retry_delay
-        self.session = build_session()
-        self.credentials: Optional[Credentials] = None
-        self.last_attempts: Dict[str, float] = {}
-
-    def _headers(self) -> Dict[str, str]:
-        if self.credentials is None:
-            raise ConfigError("尚未加载登录配置")
-        return {
-            "User-Agent": self.credentials.user_agent,
-            "Cookie": self.credentials.cookie_str,
-        }
-
-    def load_config(self) -> bool:
-        try:
-            credentials = load_credentials(self.config_path)
-        except ConfigError as exc:
-            LOGGER.info("登录配置不可用: %s", exc)
-            self.credentials = None
-            return False
-        if credentials.qq != self.qq:
-            LOGGER.warning(
-                "配置中的 QQ (%s) 与当前 QQ (%s) 不一致", credentials.qq, self.qq
-            )
-            self.credentials = None
-            return False
-        self.credentials = credentials
-        return True
-
-    def check_cookie_valid(self) -> bool:
-        if self.credentials is None:
-            return False
-        url = f"https://user.qzone.qq.com/{self.qq}/infocenter"
-        try:
-            response = self.session.get(
-                url,
-                headers=self._headers(),
-                allow_redirects=False,
-                timeout=REQUEST_TIMEOUT,
-            )
-        except requests.RequestException as exc:
-            LOGGER.warning("Cookie 校验请求失败: %s", exc)
-            return False
-
-        if response.status_code == 200:
-            return True
-        LOGGER.warning("Cookie 校验未通过，HTTP %s", response.status_code)
+def cookie_is_valid(session, qq, config):
+    url = f"https://user.qzone.qq.com/{qq}/infocenter"
+    try:
+        response = session.get(
+            url,
+            headers=request_headers(config),
+            allow_redirects=False,
+            timeout=REQUEST_TIMEOUT,
+        )
+        return response.status_code == 200
+    except requests.RequestException as exc:
+        logger.warning("登录状态检查失败: %s", exc)
         return False
 
-    def call_login(self) -> bool:
-        if not CK_SCRIPT.exists():
-            LOGGER.error("找不到登录脚本: %s", CK_SCRIPT)
-            return False
 
-        command = [
-            sys.executable,
-            str(CK_SCRIPT),
-            "--qq",
-            self.qq,
-            "--config",
-            str(self.config_path),
-        ]
-        if self.manual_login:
-            command.append("--manual")
-
-        LOGGER.info("正在打开浏览器刷新登录状态")
-        try:
-            completed = subprocess.run(command, check=False)
-        except OSError as exc:
-            LOGGER.error("无法启动登录脚本: %s", exc)
-            return False
-        if completed.returncode != 0:
-            LOGGER.error("登录脚本退出，代码 %s", completed.returncode)
-            return False
-        return True
-
-    def ensure_authenticated(self) -> bool:
-        if self.load_config() and self.check_cookie_valid():
-            return True
-        if not self.call_login():
-            return False
-        if not self.load_config():
-            LOGGER.error("登录完成后仍无法读取配置")
-            return False
-        if not self.check_cookie_valid():
-            LOGGER.error("新获取的 Cookie 未通过校验")
-            return False
-        return True
-
-    def _feed_url(self) -> str:
-        return f"https://user.qzone.qq.com/{self.qq}/infocenter?via=toolbar"
-
-    def _extract_target(self, item) -> Optional[LikeTarget]:
-        like_button = item.find("a", class_="qz_like_btn_v3")
-        if not like_button or "item-on" in like_button.get("class", []):
-            return None
-
-        fields = {
-            name: like_button.get(f"data-{name}")
-            for name in ("unikey", "curkey", "appid", "typeid", "abstime")
-        }
-        if any(value is None or value == "" for value in fields.values()):
-            LOGGER.debug("跳过缺少点赞参数的动态")
-            return None
-
-        nickname_element = item.find("a", class_="nickname")
-        nickname = (
-            nickname_element.get_text(strip=True) if nickname_element else "未知用户"
-        )
-        return LikeTarget(nickname=nickname, **fields)
-
-    def _can_attempt(self, key: str, now: float) -> bool:
-        previous = self.last_attempts.get(key)
-        if previous is not None and now - previous < self.retry_delay:
-            return False
-        self.last_attempts[key] = now
-        expiry = now - (self.retry_delay * 2)
-        self.last_attempts = {
-            item_key: attempted_at
-            for item_key, attempted_at in self.last_attempts.items()
-            if attempted_at >= expiry
-        }
-        return True
-
-    def do_like(self, target: LikeTarget) -> Tuple[bool, str]:
-        if self.credentials is None:
-            return False, "尚未加载登录配置"
-
-        endpoint = (
-            "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/"
-            "cgi-bin/likes/internal_dolike_app"
-        )
-        referer = self._feed_url()
-        headers = {
-            **self._headers(),
-            "Referer": referer,
-            "Origin": "https://user.qzone.qq.com",
-        }
-        payload = {
-            "qzreferrer": referer,
-            "opuin": self.qq,
-            "unikey": target.unikey,
-            "curkey": target.curkey,
-            "from": "1",
-            "appid": target.appid,
-            "typeid": target.typeid,
-            "abstime": target.abstime,
-            "fid": target.unikey.rsplit("/", 1)[-1],
-            "active": "0",
-            "fupdate": "1",
-            "g_tk": str(self.credentials.g_tk),
-        }
-
-        try:
-            response = self.session.post(
-                endpoint,
-                params={"g_tk": self.credentials.g_tk},
-                data=payload,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            return False, f"请求失败: {exc}"
-
-        code = extract_callback_code(response.text)
-        if code == 0:
-            return True, "成功"
-        if code is None:
-            return False, "服务端响应中没有可识别的结果码"
-        return False, f"服务端结果码 {code}"
-
-    def poll_once(self) -> Tuple[int, int]:
-        try:
-            response = self.session.get(
-                self._feed_url(),
-                headers=self._headers(),
-                allow_redirects=True,
-                timeout=REQUEST_TIMEOUT,
-            )
-            response.raise_for_status()
-        except requests.RequestException:
-            raise
-
-        final_url = response.url.lower()
-        if "login" in final_url or "ptlogin" in final_url:
-            raise AuthenticationExpired("动态页已跳转到登录页面")
-
-        soup = BeautifulSoup(response.content, "html.parser")
-        items = soup.find_all("li", class_="f-single")
-        attempted = 0
-        succeeded = 0
-        now = time.monotonic()
-
-        for item in items:
-            target = self._extract_target(item)
-            if target is None or not self._can_attempt(target.unikey, now):
-                continue
-            attempted += 1
-            LOGGER.info("发现未点赞动态: %s", target.nickname)
-            success, message = self.do_like(target)
-            if success:
-                succeeded += 1
-                LOGGER.info("点赞成功: %s", target.nickname)
-            else:
-                LOGGER.warning("点赞失败: %s（%s）", target.nickname, message)
-            time.sleep(random.uniform(1.0, 2.5))
-
-        LOGGER.debug("本轮读取 %s 条动态，尝试 %s 次", len(items), attempted)
-        return attempted, succeeded
-
-    def run(
-        self,
-        interval: float,
-        jitter: float,
-        auth_check_interval: float,
-        run_once: bool,
-    ) -> int:
-        LOGGER.info("QZone Auto Liker v%s 启动，账号 %s", VERSION, self.qq)
-        if not self.ensure_authenticated():
-            return 1
-        LOGGER.info("登录状态有效，开始检查动态")
-        next_auth_check = time.monotonic() + auth_check_interval
-
-        while True:
-            try:
-                if time.monotonic() >= next_auth_check:
-                    if not self.check_cookie_valid():
-                        LOGGER.warning("登录状态已失效，尝试重新登录")
-                        if not self.ensure_authenticated():
-                            return 1
-                    next_auth_check = time.monotonic() + auth_check_interval
-
-                attempted, succeeded = self.poll_once()
-                if run_once:
-                    LOGGER.info("单次检查结束：尝试 %s，成功 %s", attempted, succeeded)
-                    return 0
-            except AuthenticationExpired as exc:
-                LOGGER.warning("%s，尝试重新登录", exc)
-                if not self.ensure_authenticated():
-                    return 1
-            except requests.RequestException as exc:
-                LOGGER.warning("动态请求暂时失败: %s", exc)
-                if run_once:
-                    return 1
-            except KeyboardInterrupt:
-                LOGGER.info("收到退出信号，程序已停止")
-                return 0
-            except Exception:
-                LOGGER.exception("检查动态时发生未预期错误")
-                if run_once:
-                    return 1
-
-            time.sleep(interval + random.uniform(0, jitter))
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="QQ 空间好友动态自动点赞工具")
-    parser.add_argument("--qq", help="QQ 号；首次运行必填，之后会从配置读取")
-    parser.add_argument(
+def open_login(qq, config_path, manual):
+    command = [
+        sys.executable,
+        str(LOGIN_SCRIPT),
+        "--qq",
+        qq,
         "--config",
-        type=Path,
-        default=DEFAULT_CONFIG_FILE,
-        help=f"凭据文件路径（默认: {DEFAULT_CONFIG_FILE.name}）",
+        str(config_path),
+    ]
+    if manual:
+        command.append("--manual")
+    return subprocess.run(command, check=False).returncode == 0
+
+
+def ensure_login(session, qq, config_path, manual):
+    try:
+        config = load_config(config_path)
+        if config["qq"] == qq and cookie_is_valid(session, qq, config):
+            return config
+    except ValueError:
+        pass
+
+    logger.info("需要登录，正在打开 Chrome")
+    if not open_login(qq, config_path, manual):
+        raise LoginRequired("登录没有完成")
+    return load_config(config_path)
+
+
+def like_post(session, qq, config, button):
+    fields = {
+        name: button.get(f"data-{name}")
+        for name in ("unikey", "curkey", "appid", "typeid", "abstime")
+    }
+    if not all(fields.values()):
+        return False
+
+    feed_url = f"https://user.qzone.qq.com/{qq}/infocenter?via=toolbar"
+    headers = {
+        **request_headers(config),
+        "Referer": feed_url,
+        "Origin": "https://user.qzone.qq.com",
+    }
+    data = {
+        "qzreferrer": feed_url,
+        "opuin": qq,
+        **fields,
+        "from": "1",
+        "fid": fields["unikey"].rsplit("/", 1)[-1],
+        "active": "0",
+        "fupdate": "1",
+        "g_tk": str(config["g_tk"]),
+    }
+
+    try:
+        response = session.post(
+            LIKE_URL,
+            params={"g_tk": config["g_tk"]},
+            data=data,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("点赞请求失败: %s", exc)
+        return False
+
+    match = re.search(r'"?code"?\s*:\s*(-?\d+)', response.text)
+    return bool(match and match.group(1) == "0")
+
+
+def check_feed(session, qq, config, attempted):
+    url = f"https://user.qzone.qq.com/{qq}/infocenter?via=toolbar"
+    response = session.get(
+        url,
+        headers=request_headers(config),
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    if "login" in response.url.lower() or "ptlogin" in response.url.lower():
+        raise LoginRequired("登录状态已失效")
+
+    items = BeautifulSoup(response.content, "html.parser").find_all(
+        "li", class_="f-single"
+    )
+    success_count = 0
+    for item in items:
+        button = item.find("a", class_="qz_like_btn_v3")
+        if not button or "item-on" in button.get("class", []):
+            continue
+
+        key = button.get("data-unikey")
+        if not key or key in attempted:
+            continue
+        attempted.add(key)
+
+        nickname = item.find("a", class_="nickname")
+        nickname = nickname.get_text(strip=True) if nickname else "未知用户"
+        if like_post(session, qq, config, button):
+            success_count += 1
+            logger.info("点赞成功: %s", nickname)
+        else:
+            logger.warning("点赞失败: %s", nickname)
+        time.sleep(random.uniform(1, 2))
+
+    return len(items), success_count
+
+
+def interval_value(value):
+    interval = float(value)
+    if interval < 5:
+        raise argparse.ArgumentTypeError("轮询间隔不能小于 5 秒")
+    return interval
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="QQ 空间好友动态自动点赞")
+    parser.add_argument("--qq", help="QQ 号，首次运行时需要")
+    parser.add_argument(
+        "--config", type=Path, default=DEFAULT_CONFIG, help="配置文件路径"
     )
     parser.add_argument(
-        "--interval",
-        type=positive_number,
-        default=30.0,
-        help="动态轮询基础间隔，单位秒（默认: 30）",
+        "--interval", type=interval_value, default=30, help="轮询间隔，默认 30 秒"
     )
-    parser.add_argument(
-        "--jitter",
-        type=non_negative_number,
-        default=5.0,
-        help="每轮附加的随机等待上限，单位秒（默认: 5）",
-    )
-    parser.add_argument(
-        "--retry-delay",
-        type=positive_number,
-        default=300.0,
-        help="同一动态再次尝试前的等待时间，单位秒（默认: 300）",
-    )
-    parser.add_argument(
-        "--auth-check-interval",
-        type=positive_number,
-        default=300.0,
-        help="主动校验登录状态的间隔，单位秒（默认: 300）",
-    )
-    parser.add_argument("--manual-login", action="store_true", help="登录时等待手动扫码或点击")
-    parser.add_argument("--once", action="store_true", help="只检查一轮后退出")
-    parser.add_argument("--no-log-file", action="store_true", help="不写入 app.log")
-    parser.add_argument("--verbose", action="store_true", help="输出调试日志")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument("--manual-login", action="store_true", help="登录时等待手动操作")
+    parser.add_argument("--once", action="store_true", help="只检查一次")
     return parser.parse_args()
 
 
-def main() -> int:
+def main():
     args = parse_args()
-    configure_logging(None if args.no_log_file else DEFAULT_LOG_FILE, args.verbose)
+    config_path = args.config.resolve()
     try:
-        qq = resolve_qq(args.qq, args.config.resolve())
-    except ConfigError as exc:
-        LOGGER.error("%s", exc)
+        qq = resolve_qq(args.qq, config_path)
+    except ValueError as exc:
+        logger.error("%s", exc)
         return 2
 
-    application = QZoneAutoLiker(
-        qq=qq,
-        config_path=args.config.resolve(),
-        manual_login=args.manual_login,
-        retry_delay=args.retry_delay,
-    )
-    return application.run(
-        interval=args.interval,
-        jitter=args.jitter,
-        auth_check_interval=args.auth_check_interval,
-        run_once=args.once,
-    )
+    session = requests.Session()
+    attempted = set()
+    try:
+        config = ensure_login(session, qq, config_path, args.manual_login)
+        while True:
+            try:
+                total, liked = check_feed(session, qq, config, attempted)
+                logger.info("本轮检查 %s 条动态，点赞 %s 条", total, liked)
+            except LoginRequired:
+                config = ensure_login(session, qq, config_path, args.manual_login)
+                continue
+            except requests.RequestException as exc:
+                logger.warning("读取动态失败: %s", exc)
+
+            if args.once:
+                break
+            time.sleep(args.interval)
+    except (LoginRequired, ValueError, OSError) as exc:
+        logger.error("%s", exc)
+        return 1
+    except KeyboardInterrupt:
+        logger.info("程序已停止")
+    return 0
 
 
 if __name__ == "__main__":

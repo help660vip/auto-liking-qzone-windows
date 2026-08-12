@@ -1,87 +1,77 @@
 # -*- coding: utf-8 -*-
-"""Open Chrome, complete QZone login, and save the resulting credentials."""
-
-from __future__ import annotations
+"""通过 Chrome 登录 QQ 空间并保存 Cookie。"""
 
 import argparse
+import json
 import sys
+import time
 from pathlib import Path
-from typing import Optional
 
 from selenium import webdriver
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-
-from qzone_utils import (
-    ConfigError,
-    Credentials,
-    calculate_g_tk,
-    cookie_value,
-    read_qq_hint,
-    save_credentials,
-    validate_qq,
-)
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG_FILE = PROJECT_DIR / "config.json"
-DEFAULT_DRIVER = PROJECT_DIR / "chromedriver.exe"
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG = BASE_DIR / "config.json"
+DEFAULT_DRIVER = BASE_DIR / "chromedriver.exe"
 
 
-def resolve_qq(cli_value: Optional[str], config_path: Path) -> str:
-    if cli_value:
-        return validate_qq(cli_value)
-    saved_qq = read_qq_hint(config_path)
-    if saved_qq:
-        return saved_qq
-    if sys.stdin.isatty():
-        return validate_qq(input("请输入要登录的 QQ 号: "))
-    raise ConfigError("首次运行需要通过 --qq 指定 QQ 号")
+def validate_qq(value):
+    qq = str(value or "").strip()
+    if not qq.isdigit() or not 5 <= len(qq) <= 12 or qq.startswith("0"):
+        raise ValueError("QQ 号格式不正确")
+    return qq
 
 
-def create_driver(driver_path: Optional[Path], proxy: Optional[str]):
+def resolve_qq(value, config_path):
+    if value:
+        return validate_qq(value)
+    try:
+        with config_path.open("r", encoding="utf-8") as file:
+            return validate_qq(json.load(file).get("qq"))
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+        if sys.stdin.isatty():
+            return validate_qq(input("请输入 QQ 号: "))
+        raise ValueError("首次运行请使用 --qq 指定 QQ 号")
+
+
+def calculate_g_tk(skey):
+    value = 5381
+    for character in skey:
+        value += (value << 5) + ord(character)
+    return value & 0x7FFFFFFF
+
+
+def create_driver(driver_path):
     options = Options()
     options.add_experimental_option("excludeSwitches", ["enable-logging"])
-    if proxy:
-        options.add_argument(f"--proxy-server={proxy}")
 
-    selected_driver = driver_path
-    if selected_driver is None and DEFAULT_DRIVER.exists():
-        selected_driver = DEFAULT_DRIVER
-    if selected_driver is not None:
-        selected_driver = selected_driver.expanduser().resolve()
-        if not selected_driver.is_file():
-            raise ConfigError(f"ChromeDriver 不存在: {selected_driver}")
+    selected = driver_path
+    if selected is None and DEFAULT_DRIVER.exists():
+        selected = DEFAULT_DRIVER
+    if selected is not None:
+        selected = selected.expanduser().resolve()
+        if not selected.is_file():
+            raise ValueError(f"找不到 ChromeDriver: {selected}")
         return webdriver.Chrome(
-            service=Service(executable_path=str(selected_driver)), options=options
+            service=Service(executable_path=str(selected)), options=options
         )
-
-    print("[登录] 未指定 ChromeDriver，将由 Selenium Manager 自动匹配")
     return webdriver.Chrome(options=options)
 
 
-def try_automatic_login(driver, qq: str) -> None:
-    print("[登录] 尝试点击浏览器中已保存的 QQ 账号")
+def click_saved_account(driver, qq):
     try:
-        WebDriverWait(driver, 15).until(
-            EC.frame_to_be_available_and_switch_to_it((By.ID, "login_frame"))
-        )
+        time.sleep(2)
+        driver.switch_to.frame("login_frame")
         try:
-            avatar = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.ID, f"img_out_{qq}"))
-            )
-        except TimeoutException:
-            avatar = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "#qlogin_list a"))
-            )
-        avatar.click()
-    except (TimeoutException, WebDriverException) as exc:
-        print(f"[登录] 自动点击未完成: {exc}")
-        print("[登录] 请在浏览器中手动完成登录")
+            driver.find_element(By.ID, f"img_out_{qq}").click()
+        except WebDriverException:
+            driver.find_element(By.CSS_SELECTOR, "#qlogin_list a").click()
+    except WebDriverException:
+        print("[登录] 未找到已保存账号，请手动登录")
     finally:
         try:
             driver.switch_to.default_content()
@@ -89,120 +79,90 @@ def try_automatic_login(driver, qq: str) -> None:
             pass
 
 
-def is_logged_in(driver) -> bool:
-    current_url = driver.current_url.lower()
-    return "user.qzone.qq.com" in current_url and "passport" not in current_url
+def wait_for_login(driver, timeout=180):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        url = driver.current_url.lower()
+        if "user.qzone.qq.com" in url and "passport" not in url:
+            return True
+        time.sleep(1)
+    return False
 
 
-def acquire_credentials(
-    qq: str,
-    config_path: Path,
-    manual: bool,
-    driver_path: Optional[Path],
-    proxy: Optional[str],
-    login_timeout: float,
-) -> bool:
+def save_config(driver, qq, config_path):
+    cookies = driver.get_cookies()
+    cookie_str = "; ".join(
+        f"{cookie['name']}={cookie['value']}" for cookie in cookies
+    )
+    cookie_map = {cookie["name"]: cookie["value"] for cookie in cookies}
+    skey = cookie_map.get("p_skey") or cookie_map.get("skey")
+    if not skey:
+        raise ValueError("登录 Cookie 中缺少 p_skey/skey")
+
+    data = {
+        "qq": qq,
+        "cookie_str": cookie_str,
+        "user_agent": driver.execute_script("return navigator.userAgent;"),
+        "g_tk": calculate_g_tk(skey),
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = config_path.with_name(f"{config_path.name}.tmp")
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2, ensure_ascii=False)
+    temporary.replace(config_path)
+
+
+def login(qq, config_path, manual, driver_path):
     driver = None
     try:
         print("[登录] 正在启动 Chrome")
-        driver = create_driver(driver_path, proxy)
+        driver = create_driver(driver_path)
         driver.get("https://qzone.qq.com/")
-
         if manual:
-            print("[登录] 请扫码或点击账号登录")
+            print("[登录] 请在浏览器中完成登录")
         else:
-            try_automatic_login(driver, qq)
+            click_saved_account(driver, qq)
 
-        print(f"[登录] 等待登录完成，最多 {int(login_timeout)} 秒")
-        WebDriverWait(driver, login_timeout, poll_frequency=1).until(is_logged_in)
+        if not wait_for_login(driver):
+            print("[登录] 等待登录超时")
+            return False
 
-        target_url = f"https://user.qzone.qq.com/{qq}/infocenter?via=toolbar"
-        driver.get(target_url)
-        WebDriverWait(driver, 30).until(
-            lambda browser: browser.execute_script("return document.readyState")
-            == "complete"
-        )
-
-        cookies = driver.get_cookies()
-        cookie_str = "; ".join(
-            f"{item['name']}={item['value']}" for item in cookies
-        )
-        user_agent = driver.execute_script("return navigator.userAgent;")
-        skey = cookie_value(cookie_str, "p_skey") or cookie_value(cookie_str, "skey")
-        if not skey:
-            raise ConfigError("登录 Cookie 中没有 p_skey/skey，请重新登录后再试")
-
-        credentials = Credentials(
-            qq=qq,
-            cookie_str=cookie_str,
-            user_agent=user_agent,
-            g_tk=calculate_g_tk(skey),
-        )
-        save_credentials(config_path, credentials)
-        print(f"[登录] 登录配置已保存到 {config_path}")
+        driver.get(f"https://user.qzone.qq.com/{qq}/infocenter?via=toolbar")
+        time.sleep(3)
+        save_config(driver, qq, config_path)
+        print(f"[登录] 配置已保存到 {config_path}")
         return True
-    except TimeoutException:
-        print("[登录] 等待登录超时，未写入配置")
-        return False
-    except (ConfigError, OSError, WebDriverException) as exc:
+    except (ValueError, OSError, WebDriverException) as exc:
         print(f"[登录] 失败: {exc}")
-        if isinstance(exc, WebDriverException) and driver_path is None:
-            print("[提示] 可手动下载匹配的 chromedriver.exe 并用 --driver 指定路径")
         return False
     finally:
         if driver is not None:
             driver.quit()
 
 
-def positive_number(value: str) -> float:
-    number = float(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError("必须大于 0")
-    return number
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="获取并保存 QQ 空间登录配置")
+def parse_args():
+    parser = argparse.ArgumentParser(description="登录 QQ 空间并保存 Cookie")
+    parser.add_argument("mode", nargs="?", choices=("hm",), help=argparse.SUPPRESS)
+    parser.add_argument("--qq", help="QQ 号")
     parser.add_argument(
-        "mode",
-        nargs="?",
-        choices=("hm",),
-        help=argparse.SUPPRESS,
+        "--config", type=Path, default=DEFAULT_CONFIG, help="配置文件路径"
     )
-    parser.add_argument("--qq", help="要登录的 QQ 号")
-    parser.add_argument(
-        "--config", type=Path, default=DEFAULT_CONFIG_FILE, help="配置保存路径"
-    )
-    parser.add_argument("--manual", action="store_true", help="不自动点击账号，等待手动登录")
+    parser.add_argument("--manual", action="store_true", help="等待手动登录")
     parser.add_argument("--driver", type=Path, help="本地 chromedriver.exe 路径")
-    parser.add_argument("--proxy", help="Chrome 使用的代理，例如 http://127.0.0.1:7890")
-    parser.add_argument(
-        "--login-timeout",
-        type=positive_number,
-        default=180.0,
-        help="等待登录的秒数（默认: 180）",
-    )
     return parser.parse_args()
 
 
-def main() -> int:
+def main():
     args = parse_args()
-    config_path = args.config.expanduser().resolve()
+    config_path = args.config.resolve()
     try:
         qq = resolve_qq(args.qq, config_path)
-    except ConfigError as exc:
+    except ValueError as exc:
         print(f"[登录] {exc}")
         return 2
-
-    success = acquire_credentials(
-        qq=qq,
-        config_path=config_path,
-        manual=args.manual or args.mode == "hm",
-        driver_path=args.driver,
-        proxy=args.proxy,
-        login_timeout=args.login_timeout,
-    )
-    return 0 if success else 1
+    manual = args.manual or args.mode == "hm"
+    return 0 if login(qq, config_path, manual, args.driver) else 1
 
 
 if __name__ == "__main__":

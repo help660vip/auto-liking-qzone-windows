@@ -2,6 +2,15 @@
 
 本项目的版本变更记录遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构。
 
+## [2.0.1] - 2026-08-12
+
+### 变更
+
+- 精简项目结构，将配置处理合并回两个主脚本。
+- 删除额外的批处理入口和单元测试目录。
+- README 改为中立的项目与使用说明。
+- 命令行参数仅保留账号、间隔、单次检查和登录相关选项。
+
 ## [2.0.0] - 2026-08-12
 
 ### 新增
@@ -26,3 +35,4 @@
 - 日志只记录必要的状态信息，不输出 Cookie 或令牌内容。
 
 [2.0.0]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.0
+[2.0.1]: https://github.com/help660vip/auto-liking-qzone-windows/releases/tag/v2.0.1
