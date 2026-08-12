@@ -23,8 +23,7 @@
 在项目目录打开 PowerShell 或命令提示符：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ## 使用
@@ -32,39 +31,39 @@ python -m venv .venv
 首次运行时指定 QQ 号：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py --qq 123456789
+python main.py --qq 123456789
 ```
 
 把 `123456789` 换成自己的 QQ 号。浏览器登录成功后会生成 `config.json`，以后直接运行：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py
+python main.py
 ```
 
 手动扫码登录：
 
 ```powershell
-.\.venv\Scripts\python.exe ck.py --qq 123456789 --manual
+python ck.py --qq 123456789 --manual
 ```
 
 其他用法：
 
 ```powershell
 # 每 60 秒检查一次
-.\.venv\Scripts\python.exe main.py --interval 60
+python main.py --interval 60
 
 # 只检查一次
-.\.venv\Scripts\python.exe main.py --once
+python main.py --once
 
 # 使用本地 ChromeDriver
-.\.venv\Scripts\python.exe ck.py --driver C:\tools\chromedriver.exe --manual
+python ck.py --driver C:\tools\chromedriver.exe --manual
 ```
 
 查看完整参数：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py --help
-.\.venv\Scripts\python.exe ck.py --help
+python main.py --help
+python ck.py --help
 ```
 
 ## 文件说明

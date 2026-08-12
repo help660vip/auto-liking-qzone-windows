@@ -3,7 +3,6 @@ config.json.tmp
 app.log*
 chromedriver.exe
 
-.venv/
 __pycache__/
 *.py[cod]
 
